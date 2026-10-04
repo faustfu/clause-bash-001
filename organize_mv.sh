@@ -103,14 +103,20 @@ PY
 
 case "$MODE" in
 lookup)
-  : > "$META"
+  # 增量模式: 保留既有 metadata.tsv；只查尚未有演員資料的番號（失敗過的會重試）
+  [ -f "$META" ] || : > "$META"
   for f in *; do
     [ -f "$f" ] || continue
     c=$(code_of "$f"); [ -z "$c" ] && continue
-    echo "查詢 ${c} ..." >&2
-    if ! lookup_one "$c" >> "$META"; then
-      printf '%s\t\t\t\t\t\t\t\n' "$c" >> "$META"; echo "  失敗: ${c}" >&2
+    if awk -F'\t' -v c="$c" '$1==c && $2!=""{f=1} END{exit !f}' "$META"; then
+      continue   # 已有資料（含已翻譯/手動修改）
     fi
+    echo "查詢 ${c} ..." >&2
+    if ! row=$(lookup_one "$c"); then
+      row=$(printf '%s\t\t\t\t\t\t\t' "$c"); echo "  失敗: ${c}" >&2
+    fi
+    awk -F'\t' -v c="$c" '$1!=c' "$META" > "${META}.tmp" && mv "${META}.tmp" "$META"
+    printf '%s\n' "$row" >> "$META"
     sleep 2   # 避免過度請求
   done
   translate_meta
@@ -128,7 +134,9 @@ move)
       c=$(code_of "$f")
       [ -n "$c" ] && actor=$(awk -F'\t' -v c="$c" '$1==c{print $2; exit}' "$META" 2>/dev/null | awk -F'、' '{print $1}')
     fi
-    [ -z "$actor" ] && actor="_未知演員"
+    if [ -z "$actor" ]; then   # 查無演員: 留在原處，下次 lookup 會重試
+      echo "[略過] $f (查無演員)" >&2; continue
+    fi
     actor=$(sanitize "$actor")
     # 同一影片的附屬檔（.webp/.srt 等）因檔名相同開頭也會各自處理
     if [ "${APPLY:-0}" = "1" ]; then
