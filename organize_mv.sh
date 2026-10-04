@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # organize_mv.sh — 依番號查詢演員/標題，並依「第一位演員」建立目錄歸檔 (macOS bash 3.2 相容)
 # 用法:
-#   ./organize_mv.sh lookup  [目錄]   查詢並產生 metadata.tsv（番號<TAB>演員們<TAB>標題）
+#   ./organize_mv.sh lookup  [目錄]   查詢並產生 metadata.tsv（番號,演員們,標題,說明,關鍵字；TAB 分隔）
 #   ./organize_mv.sh move    [目錄]   讀取 metadata.tsv，預設只預覽(dry-run)
 #   APPLY=1 ./organize_mv.sh move 目錄 真正搬移
 # 注意: lookup 的網頁解析(JavBus)未經測試，網站改版可能失效；可直接手動編輯 metadata.tsv
@@ -31,7 +31,7 @@ special_actor() {
 }
 
 lookup_one() {
-  local code="$1" html title actors
+  local code="$1" html title actors desc kw
   html=$(curl -fsSL -A "$UA" -H "Cookie: existmag=all; age=verified; dv=1" \
          -H "Accept-Language: zh-TW,zh;q=0.9,ja;q=0.8" "${BASE}/${code}" 2>/dev/null) || return 1
   # 年齡驗證頁或非影片頁 -> 視為失敗，不寫入垃圾標題
@@ -43,7 +43,14 @@ lookup_one() {
            | sed -E 's/.*title="([^"]*)"/\1/' | paste -sd'、' -)
   [ -z "$actors" ] && actors=$(printf '%s' "$html" | grep -oE '/star/[a-z0-9]+"><img[^>]*title="[^"]*"' \
            | sed -E 's/.*title="([^"]*)"/\1/' | paste -sd'、' -)
-  printf '%s\t%s\t%s\n' "$code" "$actors" "$title"
+  # 保底: 找不到演員區塊時，單體作品通常標題最後一個詞就是演員名
+  if [ -z "$actors" ]; then
+    actors=$(printf '%s' "$title" | awk '{print $NF}')
+    echo "  ${code}: 演員區塊解析失敗，暫用標題尾詞「${actors}」，請人工確認" >&2
+  fi
+  desc=$(printf '%s' "$html" | sed -nE 's#.*<meta name="description" content="([^"]*)".*#\1#p' | head -1)
+  kw=$(printf '%s' "$html" | sed -nE 's#.*<meta name="keywords" content="([^"]*)".*#\1#p' | head -1)
+  printf '%s\t%s\t%s\t%s\t%s\n' "$code" "$actors" "$title" "$desc" "$kw"
 }
 
 case "$MODE" in
@@ -54,7 +61,7 @@ lookup)
     c=$(code_of "$f"); [ -z "$c" ] && continue
     echo "查詢 ${c} ..." >&2
     if ! lookup_one "$c" >> "$META"; then
-      printf '%s\t\t\n' "$c" >> "$META"; echo "  失敗: ${c}" >&2
+      printf '%s\t\t\t\t\n' "$c" >> "$META"; echo "  失敗: ${c}" >&2
     fi
     sleep 2   # 避免過度請求
   done
@@ -76,7 +83,7 @@ move)
       mkdir -p "$actor" && mv -n "$f" "$actor/"
       # 存放說明文字
       c=$(code_of "$f")
-      [ -n "$c" ] && awk -F'\t' -v c="$c" '$1==c{printf "番號: %s\n演員: %s\n標題: %s\n",$1,$2,$3}' "$META" > "$actor/${f%.*}.txt"
+      [ -n "$c" ] && awk -F'\t' -v c="$c" '$1==c{printf "番號: %s\n演員: %s\n標題: %s\n說明: %s\n關鍵字: %s\n",$1,$2,$3,$4,$5}' "$META" > "$actor/${f%.*}.txt"
     else
       echo "[dry-run] $f -> $actor/"
     fi
