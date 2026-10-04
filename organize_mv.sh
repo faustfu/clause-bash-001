@@ -49,13 +49,13 @@ lookup)
   for f in *; do
     [ -f "$f" ] || continue
     c=$(code_of "$f"); [ -z "$c" ] && continue
-    echo "查詢 $c ..." >&2
+    echo "查詢 ${c} ..." >&2
     if ! lookup_one "$c" >> "$META"; then
-      printf '%s\t\t\n' "$c" >> "$META"; echo "  失敗: $c" >&2
+      printf '%s\t\t\n' "$c" >> "$META"; echo "  失敗: ${c}" >&2
     fi
     sleep 2   # 避免過度請求
   done
-  echo "完成，請檢查 $DIR/$META（空白演員欄請手動補上）" >&2
+  echo "完成，請檢查 ${DIR}/${META} （空白演員欄請手動補上）" >&2
   ;;
 move)
   for f in *; do
