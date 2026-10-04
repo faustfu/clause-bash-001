@@ -32,7 +32,10 @@ special_actor() {
 
 lookup_one() {
   local code="$1" html title actors
-  html=$(curl -fsSL -A "$UA" -H "Cookie: existmag=all" "$BASE/$code" 2>/dev/null) || return 1
+  html=$(curl -fsSL -A "$UA" -H "Cookie: existmag=all; age=verified; dv=1" \
+         -H "Accept-Language: zh-TW,zh;q=0.9,ja;q=0.8" "${BASE}/${code}" 2>/dev/null) || return 1
+  # 年齡驗證頁或非影片頁 -> 視為失敗，不寫入垃圾標題
+  case "$html" in *"Age Verification"*|*"age_verification"*|*"driver-verify"*) echo "  被年齡驗證頁擋下: ${code}" >&2; return 1 ;; esac
   title=$(printf '%s' "$html" | sed -nE 's#.*<title>([^<]*)</title>.*#\1#p' | head -1 \
           | sed -E "s/^$code +//; s/ - JavBus.*//")
   # 演員: <a href=".../star/xxx" title="名字"> ... 取 star-name 區塊
