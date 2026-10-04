@@ -3,6 +3,7 @@
 # 用法:
 #   ./organize_mv.sh lookup  [目錄]   查詢並產生 metadata.tsv（番號,演員,標題,說明,關鍵字,標題繁中,說明繁中,關鍵字繁中；TAB 分隔）
 #   ./organize_mv.sh translate [目錄] 將標題/說明/關鍵字翻成繁體中文（需 ANTHROPIC_API_KEY；lookup 結束後會自動執行）
+#   ./organize_mv.sh retry   目錄 番號...  清除錯誤的 tsv 資料並把影片移回最上層，之後重跑 lookup
 #   ./organize_mv.sh move    [目錄]   讀取 metadata.tsv，預設只預覽(dry-run)
 #   APPLY=1 ./organize_mv.sh move 目錄 真正搬移
 # 注意: lookup 的網頁解析(JavBus)未經測試，網站改版可能失效；可直接手動編輯 metadata.tsv
@@ -13,6 +14,7 @@ MODE="${1:-}"; DIR="${2:-.}"
 cd "$DIR" || exit 1
 META="metadata.tsv"
 BASE="https://www.javbus.com"
+UNK="_未知演員"
 MODEL="${TRANSLATE_MODEL:-claude-haiku-4-5-20251001}"
 API_URL="${ANTHROPIC_BASE_URL:-https://api.anthropic.com}"
 UA="Mozilla/5.0 (Macintosh; Intel Mac OS X 15_0) AppleWebKit/605.1.15 Safari/605.1.15"
@@ -46,11 +48,8 @@ lookup_one() {
            | sed -E 's/.*title="([^"]*)"/\1/' | paste -sd'、' -)
   [ -z "$actors" ] && actors=$(printf '%s' "$html" | grep -oE '/star/[a-z0-9]+"><img[^>]*title="[^"]*"' \
            | sed -E 's/.*title="([^"]*)"/\1/' | paste -sd'、' -)
-  # 保底: 找不到演員區塊時，單體作品通常標題最後一個詞就是演員名
-  if [ -z "$actors" ]; then
-    actors=$(printf '%s' "$title" | awk '{print $NF}')
-    echo "  ${code}: 演員區塊解析失敗，暫用標題尾詞「${actors}」，請人工確認" >&2
-  fi
+  # 找不到演員區塊: 演員留白（不要猜），由 move 歸入 _未知演員，之後可重試或手動補 tsv
+  [ -z "$actors" ] && echo "  ${code}: 演員區塊解析失敗" >&2
   desc=$(printf '%s' "$html" | sed -nE 's#.*<meta name="description" content="([^"]*)".*#\1#p' | head -1)
   kw=$(printf '%s' "$html" | sed -nE 's#.*<meta name="keywords" content="([^"]*)".*#\1#p' | head -1)
   printf '%s\t%s\t%s\t%s\t%s\t\t\t\n' "$code" "$actors" "$title" "$desc" "$kw"
@@ -105,9 +104,10 @@ case "$MODE" in
 lookup)
   # 增量模式: 保留既有 metadata.tsv；只查尚未有演員資料的番號（失敗過的會重試）
   [ -f "$META" ] || : > "$META"
-  for f in *; do
+  for f in * "$UNK"/*; do
     [ -f "$f" ] || continue
-    c=$(code_of "$f"); [ -z "$c" ] && continue
+    case "$f" in *.txt|*.sh|metadata.tsv*) continue ;; esac
+    c=$(code_of "${f##*/}"); [ -z "$c" ] && continue
     if awk -F'\t' -v c="$c" '$1==c && $2!=""{f=1} END{exit !f}' "$META"; then
       continue   # 已有資料（含已翻譯/手動修改）
     fi
@@ -126,29 +126,43 @@ translate)
   translate_meta
   ;;
 move)
-  for f in *; do
+  for f in * "$UNK"/*; do
     [ -f "$f" ] || continue
-    case "$f" in metadata.tsv|*.sh) continue ;; esac
-    actor=$(special_actor "$f")
-    if [ -z "$actor" ]; then
-      c=$(code_of "$f")
-      [ -n "$c" ] && actor=$(awk -F'\t' -v c="$c" '$1==c{print $2; exit}' "$META" 2>/dev/null | awk -F'、' '{print $1}')
+    case "$f" in *.txt|*.sh|metadata.tsv*) continue ;; esac
+    base="${f##*/}"
+    actor=$(special_actor "$base")
+    c=$(code_of "$base")
+    if [ -z "$actor" ] && [ -n "$c" ]; then
+      actor=$(awk -F'\t' -v c="$c" '$1==c{print $2; exit}' "$META" 2>/dev/null | awk -F'、' '{print $1}')
     fi
-    if [ -z "$actor" ]; then   # 查無演員: 留在原處，下次 lookup 會重試
-      echo "[略過] $f (查無演員)" >&2; continue
+    if [ -z "$actor" ]; then   # 查無演員 -> _未知演員（已在其中則不動；補好 tsv 後重跑 move 會移出）
+      case "$f" in "$UNK"/*) continue ;; esac
+      actor="$UNK"
     fi
     actor=$(sanitize "$actor")
-    # 同一影片的附屬檔（.webp/.srt 等）因檔名相同開頭也會各自處理
     if [ "${APPLY:-0}" = "1" ]; then
       mkdir -p "$actor" && mv -n "$f" "$actor/"
-      # 存放說明文字
-      c=$(code_of "$f")
-      [ -n "$c" ] && awk -F'\t' -v c="$c" '$1==c{printf "番號: %s\n演員: %s\n標題: %s\n原標題: %s\n說明: %s\n關鍵字: %s\n",$1,$2,($6!=""?$6:$3),$3,($7!=""?$7:$4),($8!=""?$8:$5)}' "$META" > "$actor/${f%.*}.txt"
+      if [ "$actor" != "$UNK" ] && [ -n "$c" ]; then
+        awk -F'\t' -v c="$c" '$1==c{printf "番號: %s\n演員: %s\n標題: %s\n原標題: %s\n說明: %s\n關鍵字: %s\n",$1,$2,($6!=""?$6:$3),$3,($7!=""?$7:$4),($8!=""?$8:$5)}' "$META" > "$actor/${base%.*}.txt"
+      fi
     else
       echo "[dry-run] $f -> $actor/"
     fi
   done
   [ "${APPLY:-0}" = "1" ] || echo "以上為預覽；確認後以 APPLY=1 執行。" >&2
+  ;;
+retry)
+  # ./organize_mv.sh retry 目錄 番號...  -> 刪除該番號的 tsv 資料，並把已歸檔的影片移回最上層，供重新 lookup
+  shift 2
+  for c in "$@"; do
+    c=$(printf '%s' "$c" | tr 'a-z' 'A-Z')
+    [ -f "$META" ] && { awk -F'\t' -v c="$c" '$1!=c' "$META" > "${META}.tmp" && mv "${META}.tmp" "$META"; }
+    find . -mindepth 2 -maxdepth 2 -type f -iname "${c}.*" | while IFS= read -r g; do
+      d=$(dirname "$g")
+      case "$g" in *.txt) rm -f "$g" ;; *) mv -n "$g" . && echo "已移回: $g" >&2 ;; esac
+      rmdir "$d" 2>/dev/null
+    done
+  done
   ;;
 *) sed -n '2,10p' "$0"; exit 1 ;;
 esac
